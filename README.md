@@ -15,7 +15,7 @@ It is designed around a project prefix (default: `ops`) and a workspace root (de
 ## Commands
 
 ```bash
-pre
+pre                 # interactive picker in a TTY
 pre list
 pre 08
 pre new

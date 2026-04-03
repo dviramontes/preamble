@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type config struct {
@@ -21,10 +24,17 @@ type workspace struct {
 	Name   string
 	Path   string
 	Branch string
+	Log    string
 	Num    int
 }
 
 var errUsage = errors.New("usage")
+
+const (
+	ansiReset = "\x1b[0m"
+	ansiCyan  = "\x1b[36m"
+	ansiGreen = "\x1b[32m"
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -43,11 +53,13 @@ func run(args []string) error {
 		return err
 	}
 
-	if len(args) == 0 || args[0] == "list" {
-		return listCommand(cfg)
+	if len(args) == 0 {
+		return defaultCommand(cfg)
 	}
 
 	switch args[0] {
+	case "list":
+		return listCommand(cfg)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return nil
@@ -91,6 +103,41 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stdout, path)
 		return nil
 	}
+}
+
+func defaultCommand(cfg config) error {
+	workspaces, err := collectWorkspaces(cfg)
+	if err != nil {
+		return err
+	}
+
+	if !isInteractiveSession() {
+		return printWorkspaceList(workspaces)
+	}
+
+	path, err := selectWorkspaceInteractive(cfg, workspaces)
+	if err != nil {
+		return err
+	}
+
+	if path != "" {
+		fmt.Fprintln(os.Stdout, path)
+	}
+
+	return nil
+}
+
+func isInteractiveSession() bool {
+	stdin, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	stderr, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+
+	return (stdin.Mode()&os.ModeCharDevice) != 0 && (stderr.Mode()&os.ModeCharDevice) != 0
 }
 
 func setupCommand(install bool) error {
@@ -168,7 +215,7 @@ pre() {
     local destination exit_code
 
     case "$1" in
-        ""|list|help|-h|--help|setup|init)
+        list|help|-h|--help|setup|init|remove|rm)
             command pre "$@"
             return $?
             ;;
@@ -220,21 +267,242 @@ func listCommand(cfg config) error {
 		return err
 	}
 
+	return printWorkspaceList(workspaces)
+}
+
+func printWorkspaceList(workspaces []workspace) error {
+
 	fmt.Fprintln(os.Stdout, "Available workspaces:")
 	if len(workspaces) == 0 {
 		fmt.Fprintln(os.Stdout, "  (none)")
 		return nil
 	}
 
+	color := colorEnabledFor(os.Stdout)
+
 	for _, ws := range workspaces {
-		if ws.Branch != "" {
-			fmt.Fprintf(os.Stdout, "  %s [%s]\n", ws.Name, ws.Branch)
-			continue
-		}
-		fmt.Fprintf(os.Stdout, "  %s\n", ws.Name)
+		fmt.Fprintf(os.Stdout, "  %s\n", formatWorkspaceDisplay(ws, color))
 	}
 
 	return nil
+}
+
+type workspaceItem struct {
+	workspace workspace
+}
+
+func (w workspaceItem) Title() string {
+	return formatWorkspaceDisplay(w.workspace, colorEnabledFor(os.Stderr))
+}
+
+func (w workspaceItem) Description() string {
+	return ""
+}
+
+func (w workspaceItem) FilterValue() string {
+	return strings.Join([]string{w.workspace.Name, w.workspace.Branch, w.workspace.Path}, " ")
+}
+
+func formatWorkspaceDisplay(ws workspace, color bool) string {
+	branch := ws.Branch
+	if branch == "" {
+		branch = "unknown"
+	}
+	branch = truncateWithDots(branch, 28)
+
+	logLine := ws.Log
+	if logLine == "" {
+		logLine = "no commits"
+	}
+	logLine = truncateWithDots(logLine, 52)
+
+	worktreeText := fmt.Sprintf("[%s]", ws.Name)
+	branchText := fmt.Sprintf("(%s)", branch)
+
+	if color {
+		worktreeText = colorize(worktreeText, ansiCyan)
+		branchText = colorize(branchText, ansiGreen)
+	}
+
+	return fmt.Sprintf("%s %s : %s", worktreeText, branchText, logLine)
+}
+
+func truncateWithDots(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+
+	if max <= 3 {
+		return string(runes[:max])
+	}
+
+	return string(runes[:max-3]) + "..."
+}
+
+func colorEnabledFor(f *os.File) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+
+	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
+		return false
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return false
+	}
+
+	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
+func colorize(value string, ansiColor string) string {
+	return ansiColor + value + ansiReset
+}
+
+type pickerModel struct {
+	cfg              config
+	list             list.Model
+	selected         string
+	cancelled        bool
+	confirmingDelete bool
+	deleteTarget     workspace
+	notice           string
+}
+
+func newPickerModel(cfg config, workspaces []workspace) pickerModel {
+	items := itemsFromWorkspaces(workspaces)
+
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false
+	delegate.SetHeight(1)
+	delegate.SetSpacing(0)
+	l := list.New(items, delegate, 80, 16)
+	l.Title = "Choose workspace (enter=open, d=delete)"
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(true)
+	l.SetShowPagination(false)
+	l.SetShowHelp(true)
+
+	return pickerModel{cfg: cfg, list: l}
+}
+
+func itemsFromWorkspaces(workspaces []workspace) []list.Item {
+	items := make([]list.Item, 0, len(workspaces))
+	for _, ws := range workspaces {
+		items = append(items, workspaceItem{workspace: ws})
+	}
+	return items
+}
+
+func (m pickerModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if m.confirmingDelete {
+			switch msg.String() {
+			case "y":
+				if err := removeWorkspacePath(m.cfg, m.deleteTarget.Path, false); err != nil {
+					m.notice = fmt.Sprintf("delete failed: %s", truncateWithDots(err.Error(), 80))
+				} else {
+					m.notice = fmt.Sprintf("removed %s", m.deleteTarget.Name)
+					if refreshed, err := collectWorkspaces(m.cfg); err == nil {
+						m.list.SetItems(itemsFromWorkspaces(refreshed))
+					}
+				}
+				m.confirmingDelete = false
+				return m, nil
+			case "f":
+				if err := removeWorkspacePath(m.cfg, m.deleteTarget.Path, true); err != nil {
+					m.notice = fmt.Sprintf("force delete failed: %s", truncateWithDots(err.Error(), 80))
+				} else {
+					m.notice = fmt.Sprintf("removed %s (forced)", m.deleteTarget.Name)
+					if refreshed, err := collectWorkspaces(m.cfg); err == nil {
+						m.list.SetItems(itemsFromWorkspaces(refreshed))
+					}
+				}
+				m.confirmingDelete = false
+				return m, nil
+			case "n", "q", "esc", "ctrl+c":
+				m.confirmingDelete = false
+				m.notice = "delete cancelled"
+				return m, nil
+			}
+			return m, nil
+		}
+
+		switch msg.String() {
+		case "enter":
+			selected, ok := m.list.SelectedItem().(workspaceItem)
+			if ok {
+				m.selected = selected.workspace.Path
+			}
+			return m, tea.Quit
+		case "d":
+			selected, ok := m.list.SelectedItem().(workspaceItem)
+			if ok {
+				m.confirmingDelete = true
+				m.deleteTarget = selected.workspace
+				m.notice = ""
+			}
+			return m, nil
+		case "esc", "ctrl+c", "q":
+			m.cancelled = true
+			return m, tea.Quit
+		}
+	case tea.WindowSizeMsg:
+		m.list.SetSize(msg.Width, msg.Height)
+	}
+
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m pickerModel) View() string {
+	hint := "enter=open  d=delete  q=quit"
+
+	if m.confirmingDelete {
+		prompt := fmt.Sprintf("Delete %s? [y]es [n]o [f]orce\n", m.deleteTarget.Name)
+		return hint + "\n" + prompt + m.list.View()
+	}
+
+	if m.notice != "" {
+		return hint + "\n" + m.notice + "\n" + m.list.View()
+	}
+
+	return hint + "\n" + m.list.View()
+}
+
+func selectWorkspaceInteractive(cfg config, workspaces []workspace) (string, error) {
+	if len(workspaces) == 0 {
+		return "", printWorkspaceList(workspaces)
+	}
+
+	program := tea.NewProgram(newPickerModel(cfg, workspaces), tea.WithInput(os.Stdin), tea.WithOutput(os.Stderr))
+	result, err := program.Run()
+	if err != nil {
+		return "", err
+	}
+
+	model, ok := result.(pickerModel)
+	if !ok {
+		return "", fmt.Errorf("unexpected picker model type")
+	}
+
+	if model.cancelled || model.selected == "" {
+		return "", nil
+	}
+
+	return model.selected, nil
 }
 
 func switchPathCommand(cfg config, target string) (string, error) {
@@ -362,17 +630,7 @@ func removeCommand(cfg config, rawTarget string, confirm bool, force bool) error
 		return fmt.Errorf("no workspace found for %q", rawTarget)
 	}
 
-	baseRepoPath := filepath.Join(cfg.Root, cfg.Project)
-	gitArgs := []string{"-C", baseRepoPath, "worktree", "remove"}
-	if force {
-		gitArgs = append(gitArgs, "--force")
-	}
-	gitArgs = append(gitArgs, target.Path)
-
-	cmd := exec.Command("git", gitArgs...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := removeWorkspacePath(cfg, target.Path, force); err != nil {
 		if !force {
 			return fmt.Errorf("%w (retry with --force to remove a dirty worktree)", err)
 		}
@@ -380,6 +638,27 @@ func removeCommand(cfg config, rawTarget string, confirm bool, force bool) error
 	}
 
 	fmt.Fprintf(os.Stdout, "Removed workspace: %s\n", target.Name)
+	return nil
+}
+
+func removeWorkspacePath(cfg config, workspacePath string, force bool) error {
+	baseRepoPath := filepath.Join(cfg.Root, cfg.Project)
+	gitArgs := []string{"-C", baseRepoPath, "worktree", "remove"}
+	if force {
+		gitArgs = append(gitArgs, "--force")
+	}
+	gitArgs = append(gitArgs, workspacePath)
+
+	cmd := exec.Command("git", gitArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return errors.New(msg)
+		}
+		return err
+	}
+
 	return nil
 }
 
@@ -446,6 +725,7 @@ func collectWorkspaces(cfg config) ([]workspace, error) {
 			Name:   entry.Name(),
 			Path:   path,
 			Branch: branchOrSHA(path),
+			Log:    lastCommitLine(path),
 			Num:    num,
 		})
 	}
@@ -469,6 +749,15 @@ func branchOrSHA(repoPath string) string {
 	}
 
 	return ""
+}
+
+func lastCommitLine(repoPath string) string {
+	logLine, err := gitOutput(repoPath, "log", "-1", "--pretty=format:%s")
+	if err != nil {
+		return ""
+	}
+
+	return logLine
 }
 
 func gitOutput(repoPath string, args ...string) (string, error) {
