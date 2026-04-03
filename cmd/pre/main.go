@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -121,23 +122,35 @@ func defaultCommand(cfg config) error {
 	}
 
 	if path != "" {
-		fmt.Fprintln(os.Stdout, path)
+		if err := emitSelectionPath(path); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func isInteractiveSession() bool {
-	stdin, err := os.Stdin.Stat()
-	if err != nil {
-		return false
+func emitSelectionPath(path string) error {
+	selectionFile := os.Getenv("PRE_SELECTION_FILE")
+	if selectionFile == "" {
+		fmt.Fprintln(os.Stdout, path)
+		return nil
 	}
+
+	return os.WriteFile(selectionFile, []byte(path+"\n"), 0600)
+}
+
+func isInteractiveSession() bool {
 	stderr, err := os.Stderr.Stat()
 	if err != nil {
 		return false
 	}
 
-	return (stdin.Mode()&os.ModeCharDevice) != 0 && (stderr.Mode()&os.ModeCharDevice) != 0
+	if (stderr.Mode() & os.ModeCharDevice) == 0 {
+		return false
+	}
+
+	return !strings.EqualFold(os.Getenv("TERM"), "dumb")
 }
 
 func setupCommand(install bool) error {
@@ -212,7 +225,7 @@ func zshWrapperBlock() string {
 	return strings.TrimSpace(`
 # >>> pre zsh wrapper >>>
 pre() {
-    local destination exit_code
+    local destination exit_code selection_file
 
     case "$1" in
         list|help|-h|--help|setup|init|remove|rm)
@@ -221,8 +234,16 @@ pre() {
             ;;
     esac
 
-    destination="$(command pre "$@")"
-    exit_code=$?
+    if [ -z "$1" ]; then
+        selection_file=$(mktemp 2>/dev/null) || return 1
+        PRE_SELECTION_FILE="$selection_file" command pre "$@"
+        exit_code=$?
+        destination=$(tr -d '\n' < "$selection_file")
+        rm -f "$selection_file"
+    else
+        destination="$(command pre "$@")"
+        exit_code=$?
+    fi
 
     if [ "$exit_code" -ne 0 ]; then
         [ -n "$destination" ] && printf '%s\n' "$destination"
@@ -370,6 +391,8 @@ type pickerModel struct {
 	list             list.Model
 	selected         string
 	cancelled        bool
+	actionMode       bool
+	actionTarget     workspace
 	confirmingDelete bool
 	deleteTarget     workspace
 	notice           string
@@ -383,13 +406,34 @@ func newPickerModel(cfg config, workspaces []workspace) pickerModel {
 	delegate.SetHeight(1)
 	delegate.SetSpacing(0)
 	l := list.New(items, delegate, 80, 16)
-	l.Title = "Choose workspace (enter=open, d=delete)"
+	l.Title = "Choose workspace (enter=actions, d/x=delete, q=quit)"
 	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(true)
+	l.SetFilteringEnabled(false)
 	l.SetShowPagination(false)
-	l.SetShowHelp(true)
+	l.SetShowHelp(false)
 
-	return pickerModel{cfg: cfg, list: l}
+	m := pickerModel{cfg: cfg, list: l}
+	m.refreshTitle()
+	return m
+}
+
+func (m *pickerModel) refreshTitle() {
+	if m.confirmingDelete {
+		m.list.Title = "Delete? y=yes n=no f=force"
+		return
+	}
+
+	if m.actionMode {
+		m.list.Title = "Action: enter/o=open d/x=delete n/q=cancel"
+		return
+	}
+
+	if m.notice != "" {
+		m.list.Title = "Notice: " + truncateWithDots(m.notice, 40)
+		return
+	}
+
+	m.list.Title = "Choose workspace (enter=actions, d/x=delete, q=quit)"
 }
 
 func itemsFromWorkspaces(workspaces []workspace) []list.Item {
@@ -407,9 +451,33 @@ func (m pickerModel) Init() tea.Cmd {
 func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.actionMode {
+			switch {
+			case isEnterKey(msg) || isOpenKey(msg):
+				m.selected = m.actionTarget.Path
+				m.actionMode = false
+				m.refreshTitle()
+				return m, tea.Quit
+			case isDeleteRequest(msg):
+				m.confirmingDelete = true
+				m.deleteTarget = m.actionTarget
+				m.actionMode = false
+				m.notice = ""
+				m.refreshTitle()
+				return m, nil
+			case isNoKey(msg):
+				m.actionMode = false
+				m.notice = "action cancelled"
+				m.refreshTitle()
+				return m, nil
+			}
+
+			return m, nil
+		}
+
 		if m.confirmingDelete {
-			switch msg.String() {
-			case "y":
+			switch {
+			case isYesKey(msg):
 				if err := removeWorkspacePath(m.cfg, m.deleteTarget.Path, false); err != nil {
 					m.notice = fmt.Sprintf("delete failed: %s", truncateWithDots(err.Error(), 80))
 				} else {
@@ -419,8 +487,9 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.confirmingDelete = false
+				m.refreshTitle()
 				return m, nil
-			case "f":
+			case isForceKey(msg):
 				if err := removeWorkspacePath(m.cfg, m.deleteTarget.Path, true); err != nil {
 					m.notice = fmt.Sprintf("force delete failed: %s", truncateWithDots(err.Error(), 80))
 				} else {
@@ -430,33 +499,47 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.confirmingDelete = false
+				m.refreshTitle()
 				return m, nil
-			case "n", "q", "esc", "ctrl+c":
+			case isNoKey(msg):
 				m.confirmingDelete = false
 				m.notice = "delete cancelled"
+				m.refreshTitle()
 				return m, nil
 			}
 			return m, nil
 		}
 
-		switch msg.String() {
-		case "enter":
+		switch {
+		case isEnterKey(msg):
 			selected, ok := m.list.SelectedItem().(workspaceItem)
 			if ok {
-				m.selected = selected.workspace.Path
+				m.actionMode = true
+				m.actionTarget = selected.workspace
+				m.notice = ""
+				m.refreshTitle()
+			} else {
+				m.notice = "no workspace selected"
+				m.refreshTitle()
 			}
+			return m, nil
+		case isQuitKey(msg):
+			m.cancelled = true
 			return m, tea.Quit
-		case "d":
+		}
+
+		if isDeleteRequest(msg) {
 			selected, ok := m.list.SelectedItem().(workspaceItem)
 			if ok {
 				m.confirmingDelete = true
 				m.deleteTarget = selected.workspace
 				m.notice = ""
+				m.refreshTitle()
+			} else {
+				m.notice = "no workspace selected"
+				m.refreshTitle()
 			}
 			return m, nil
-		case "esc", "ctrl+c", "q":
-			m.cancelled = true
-			return m, tea.Quit
 		}
 	case tea.WindowSizeMsg:
 		m.list.SetSize(msg.Width, msg.Height)
@@ -468,18 +551,50 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m pickerModel) View() string {
-	hint := "enter=open  d=delete  q=quit"
+	return m.list.View()
+}
 
-	if m.confirmingDelete {
-		prompt := fmt.Sprintf("Delete %s? [y]es [n]o [f]orce\n", m.deleteTarget.Name)
-		return hint + "\n" + prompt + m.list.View()
+func isEnterKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyEnter || strings.EqualFold(msg.String(), "enter")
+}
+
+func isOpenKey(msg tea.KeyMsg) bool {
+	return isRuneKey(msg, 'o')
+}
+
+func isQuitKey(msg tea.KeyMsg) bool {
+	key := strings.ToLower(msg.String())
+	return key == "q" || key == "esc" || key == "ctrl+c"
+}
+
+func isDeleteRequest(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyCtrlD, tea.KeyDelete, tea.KeyBackspace:
+		return true
 	}
 
-	if m.notice != "" {
-		return hint + "\n" + m.notice + "\n" + m.list.View()
+	return isRuneKey(msg, 'd') || isRuneKey(msg, 'x') || strings.EqualFold(msg.String(), "delete") || strings.EqualFold(msg.String(), "ctrl+d")
+}
+
+func isYesKey(msg tea.KeyMsg) bool {
+	return isRuneKey(msg, 'y') || strings.EqualFold(msg.String(), "yes")
+}
+
+func isNoKey(msg tea.KeyMsg) bool {
+	key := strings.ToLower(msg.String())
+	return isRuneKey(msg, 'n') || key == "no" || key == "q" || key == "esc" || key == "ctrl+c"
+}
+
+func isForceKey(msg tea.KeyMsg) bool {
+	return isRuneKey(msg, 'f') || strings.EqualFold(msg.String(), "force")
+}
+
+func isRuneKey(msg tea.KeyMsg, expected rune) bool {
+	if msg.Type != tea.KeyRunes || len(msg.Runes) == 0 {
+		return false
 	}
 
-	return hint + "\n" + m.list.View()
+	return unicode.ToLower(msg.Runes[0]) == unicode.ToLower(expected)
 }
 
 func selectWorkspaceInteractive(cfg config, workspaces []workspace) (string, error) {
@@ -487,7 +602,7 @@ func selectWorkspaceInteractive(cfg config, workspaces []workspace) (string, err
 		return "", printWorkspaceList(workspaces)
 	}
 
-	program := tea.NewProgram(newPickerModel(cfg, workspaces), tea.WithInput(os.Stdin), tea.WithOutput(os.Stderr))
+	program := tea.NewProgram(newPickerModel(cfg, workspaces), tea.WithInputTTY(), tea.WithOutput(os.Stderr))
 	result, err := program.Run()
 	if err != nil {
 		return "", err
