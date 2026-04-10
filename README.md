@@ -4,6 +4,8 @@
 
 It is designed around a project prefix (default: `project`) and a workspace root (default: `~/local/work`).
 
+![pre-amble worktree browser](./assets/pre-amble.png)
+
 ## What it does
 
 - List numbered worktrees like `project-08` with their current branch.
