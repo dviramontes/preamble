@@ -573,6 +573,9 @@ func (c *pickerController) openActionsDialog() {
 		End()
 
 	dialog := builder.Container()
+	openButton := z.Find(dialog, "picker-actions-open")
+	deleteButton := z.Find(dialog, "picker-actions-delete")
+	cancelButton := z.Find(dialog, "picker-actions-cancel")
 	z.OnKey(dialog, func(_ z.Widget, ev *tcell.EventKey) bool {
 		switch {
 		case isEnterKey(ev), isOpenKey(ev):
@@ -591,23 +594,24 @@ func (c *pickerController) openActionsDialog() {
 			return false
 		}
 	})
-	z.Find(dialog, "picker-actions-open").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+	openButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		c.ui.Close()
 		c.openWorkspace(c.list.Selected())
 		return true
 	})
-	z.Find(dialog, "picker-actions-delete").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+	deleteButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		c.ui.Close()
 		c.openDeleteDialog()
 		return true
 	})
-	z.Find(dialog, "picker-actions-cancel").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+	cancelButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		c.ui.Close()
 		c.setNotice("action cancelled")
 		return true
 	})
 
 	c.ui.Popup(-1, -1, 0, 0, dialog)
+	c.ui.Focus(openButton)
 }
 
 func (c *pickerController) openDeleteDialog() {
@@ -633,6 +637,9 @@ func (c *pickerController) openDeleteDialog() {
 		End()
 
 	dialog := builder.Container()
+	removeButton := z.Find(dialog, "picker-delete-remove")
+	forceButton := z.Find(dialog, "picker-delete-force")
+	cancelButton := z.Find(dialog, "picker-delete-cancel")
 	perform := func(force bool) bool {
 		c.ui.Close()
 		c.removeWorkspace(ws, index, force)
@@ -652,19 +659,20 @@ func (c *pickerController) openDeleteDialog() {
 			return false
 		}
 	})
-	z.Find(dialog, "picker-delete-remove").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+	removeButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		return perform(false)
 	})
-	z.Find(dialog, "picker-delete-force").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+	forceButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		return perform(true)
 	})
-	z.Find(dialog, "picker-delete-cancel").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+	cancelButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		c.ui.Close()
 		c.setNotice("delete cancelled")
 		return true
 	})
 
 	c.ui.Popup(-1, -1, 0, 0, dialog)
+	c.ui.Focus(removeButton)
 }
 
 func (c *pickerController) removeWorkspace(ws workspace, index int, force bool) {
