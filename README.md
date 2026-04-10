@@ -2,11 +2,11 @@
 
 `pre`amble is a small workspace helper for git worktrees.
 
-It is designed around a project prefix (default: `ops`) and a workspace root (default: `~/local/work`).
+It is designed around a project prefix (default: `project`) and a workspace root (default: `~/local/work`).
 
 ## What it does
 
-- List numbered worktrees like `ops-08` with their current branch.
+- List numbered worktrees like `project-08` with their current branch.
 - Resolve a suffix (e.g. `pre 08`) to a workspace path.
 - Create the next worktree with `pre new` from `origin/main`.
 - Create from another base ref with `pre new <branch>` (resolved as `origin/<branch>`).
@@ -47,8 +47,13 @@ In this dotfiles setup, `wt` is an alias to `pre`.
 
 Environment variables:
 
-- `PRE_ROOT` (default: `$HOME/local/work`)
-- `PRE_PROJECT` (default: `ops`)
+- `PRE_BASE` (default: `$HOME/local/work/project`)
+
+Example:
+
+```bash
+export PRE_BASE="${HOME}/local/work/project"
+```
 
 ## Development
 

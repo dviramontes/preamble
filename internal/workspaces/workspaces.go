@@ -31,18 +31,17 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 
-	root := os.Getenv("PRE_ROOT")
-	if root == "" {
-		root = filepath.Join(home, "local", "work")
+	base := os.Getenv("PRE_BASE")
+	if base == "" {
+		base = filepath.Join(home, "local", "work", "project")
 	}
-	if strings.HasPrefix(root, "~/") {
-		root = filepath.Join(home, root[2:])
+	if strings.HasPrefix(base, "~/") {
+		base = filepath.Join(home, base[2:])
 	}
 
-	project := os.Getenv("PRE_PROJECT")
-	if project == "" {
-		project = "ops"
-	}
+	base = filepath.Clean(base)
+	root := filepath.Dir(base)
+	project := filepath.Base(base)
 
 	return Config{Root: root, Project: project}, nil
 }

@@ -426,6 +426,7 @@ func newPickerController(cfg config, workspaces []workspace) (*pickerController,
 		Static("picker-cwd", "").Foreground("$gray").
 		HRule("thin").
 		Flex("picker-actions", true, "start", 2).
+		Button("picker-new", "New").
 		Button("picker-open", "Open").
 		Button("picker-delete", "Delete").
 		Button("picker-refresh", "Refresh").
@@ -434,7 +435,7 @@ func newPickerController(cfg config, workspaces []workspace) (*pickerController,
 		End().
 		End().
 		Static("picker-notice", "").Foreground("$yellow").
-		Static("picker-footer", "Enter/o open  a actions  d/x delete  r refresh  Tab move focus  q quit").Foreground("$gray").
+		Static("picker-footer", "n new  Enter/o open  a actions  d/x delete  r refresh  Tab move focus  q quit").Foreground("$gray").
 		End()
 
 	ui := builder.Build()
@@ -465,6 +466,10 @@ func newPickerController(cfg config, workspaces []workspace) (*pickerController,
 		return true
 	})
 	z.OnKey(controller.list, controller.handleListKey)
+	z.Find(ui, "picker-new").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		controller.createWorkspace("")
+		return true
+	})
 	z.Find(ui, "picker-open").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		controller.openWorkspace(controller.list.Selected())
 		return true
@@ -511,6 +516,9 @@ func (c *pickerController) handleListKey(_ z.Widget, ev *tcell.EventKey) bool {
 	case isOpenKey(ev):
 		c.openWorkspace(c.list.Selected())
 		return true
+	case isNewKey(ev):
+		c.createWorkspace("")
+		return true
 	case isActionKey(ev):
 		c.openActionsDialog()
 		return true
@@ -542,6 +550,47 @@ func (c *pickerController) openWorkspace(index int) {
 	c.selected = c.workspaces[index].Path
 	c.cancelled = false
 	c.ui.Quit()
+}
+
+func (c *pickerController) createWorkspace(baseRef string) {
+	if c.deleting {
+		c.setNotice("worktree operation already in progress")
+		return
+	}
+
+	c.deleting = true
+	defer func() {
+		c.deleting = false
+	}()
+
+	c.setNotice(fmt.Sprintf("creating next workspace from %s...", createBaseLabel(baseRef)))
+	path, err := newCommand(c.cfg, baseRef)
+	if err != nil {
+		c.setNotice(fmt.Sprintf("create failed: %s", truncateWithDots(err.Error(), 72)))
+		return
+	}
+
+	refreshed, err := collectWorkspaces(c.cfg)
+	if err != nil {
+		c.setNotice(fmt.Sprintf("created %s; refresh failed: %s", filepath.Base(path), truncateWithDots(err.Error(), 48)))
+		return
+	}
+
+	c.workspaces = refreshed
+	c.current = detectCurrentWorkspaceIndex(refreshed)
+	c.list.SetItems(workspaceLines(refreshed, c.current))
+	c.refreshMeta()
+
+	selectedIndex := 0
+	for i, ws := range refreshed {
+		if ws.Path == path {
+			selectedIndex = i
+			break
+		}
+	}
+	c.list.Select(selectedIndex)
+	c.updateSelection(selectedIndex)
+	c.setNotice(fmt.Sprintf("created %s", filepath.Base(path)))
 }
 
 func (c *pickerController) refreshMeta() {
@@ -880,7 +929,7 @@ func (c *pickerController) updateSelection(index int) {
 		setStaticText(c.branch, "branch: -")
 		setStaticText(c.commit, "commit: -")
 		setStaticText(c.cwd, "cwd: -")
-		setStaticText(c.footer, "Enter/o open  a actions  d/x delete  q quit")
+		setStaticText(c.footer, "n new  Enter/o open  a actions  d/x delete  r refresh  Tab move focus  q quit")
 		return
 	}
 
@@ -895,7 +944,7 @@ func (c *pickerController) updateSelection(index int) {
 	setStaticText(c.branch, fmt.Sprintf("branch: %s", truncateWithDots(fallbackWorkspaceBranch(ws), 68)))
 	setStaticText(c.commit, fmt.Sprintf("commit: %s", truncateWithDots(fallbackWorkspaceLog(ws), 68)))
 	setStaticText(c.cwd, fmt.Sprintf("cwd: %s", currentWorkspaceLabel(index == c.current)))
-	setStaticText(c.footer, "Enter/o open  a actions  d/x delete  r refresh  Tab move focus  q quit")
+	setStaticText(c.footer, "n new  Enter/o open  a actions  d/x delete  r refresh  Tab move focus  q quit")
 }
 
 func (c *pickerController) setNotice(message string) {
@@ -928,6 +977,13 @@ func currentWorkspaceLabel(current bool) string {
 	return "selected workspace is not current shell"
 }
 
+func createBaseLabel(baseRef string) string {
+	if baseRef == "" {
+		return "origin/main"
+	}
+	return baseRef
+}
+
 func isOpenKey(ev *tcell.EventKey) bool {
 	return isRuneKey(ev, 'o')
 }
@@ -951,6 +1007,10 @@ func isDeleteRequest(ev *tcell.EventKey) bool {
 
 func isRefreshKey(ev *tcell.EventKey) bool {
 	return isRuneKey(ev, 'r')
+}
+
+func isNewKey(ev *tcell.EventKey) bool {
+	return isRuneKey(ev, 'n')
 }
 
 func isYesKey(ev *tcell.EventKey) bool {
@@ -1112,7 +1172,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  pre               List workspaces")
 	fmt.Fprintln(out, "  pre list          List workspaces")
-	fmt.Fprintln(out, "  pre <suffix>      Print workspace path (08, 8, or ops-08)")
+	fmt.Fprintln(out, "  pre <suffix>      Print workspace path (08, 8, or project-08)")
 	fmt.Fprintln(out, "  pre new [base-ref] Create next workspace from base ref")
 	fmt.Fprintln(out, "  pre remove <suffix> --yes [--force] Remove a workspace")
 	fmt.Fprintln(out, "  pre rm <suffix> --yes [-f]          Alias for remove")
@@ -1121,6 +1181,5 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  pre init [--install] Alias for setup")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Defaults:")
-	fmt.Fprintln(out, "  PRE_ROOT=$HOME/local/work")
-	fmt.Fprintln(out, "  PRE_PROJECT=ops")
+	fmt.Fprintln(out, "  PRE_BASE=$HOME/local/work/project")
 }

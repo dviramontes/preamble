@@ -37,11 +37,11 @@ func TestNormalizeTarget(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "single digit", project: "ops", target: "8", want: "ops-08"},
-		{name: "two digits", project: "ops", target: "08", want: "ops-08"},
-		{name: "full name", project: "ops", target: "ops-08", want: "ops-08"},
-		{name: "bad prefix", project: "ops", target: "foo-08", wantErr: true},
-		{name: "bad text", project: "ops", target: "abc", wantErr: true},
+		{name: "single digit", project: "project", target: "8", want: "project-08"},
+		{name: "two digits", project: "project", target: "08", want: "project-08"},
+		{name: "full name", project: "project", target: "project-08", want: "project-08"},
+		{name: "bad prefix", project: "project", target: "foo-08", wantErr: true},
+		{name: "bad text", project: "project", target: "abc", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -66,13 +66,13 @@ func TestNormalizeTarget(t *testing.T) {
 
 func TestCollectSortsMatchingWorkspaces(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"ops-10", "ops-02", "ops-01", "skip-me"} {
+	for _, name := range []string{"project-10", "project-02", "project-01", "skip-me"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatalf("mkdir %q: %v", name, err)
 		}
 	}
 
-	items, err := Collect(Config{Root: root, Project: "ops"})
+	items, err := Collect(Config{Root: root, Project: "project"})
 	if err != nil {
 		t.Fatalf("Collect unexpected error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestCollectSortsMatchingWorkspaces(t *testing.T) {
 		t.Fatalf("Collect length = %d, want 3", len(items))
 	}
 
-	want := []string{"ops-01", "ops-02", "ops-10"}
+	want := []string{"project-01", "project-02", "project-10"}
 	for i, name := range want {
 		if items[i].Name != name {
 			t.Fatalf("Collect[%d].Name = %q, want %q", i, items[i].Name, name)
