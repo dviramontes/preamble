@@ -6,28 +6,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
-	"unicode"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/dviramontes/preamble/internal/workspaces"
+	"github.com/gdamore/tcell/v3"
+	z "github.com/tekugo/zeichenwerk"
 )
 
-type config struct {
-	Root    string
-	Project string
-}
+type config = workspaces.Config
 
-type workspace struct {
-	Name   string
-	Path   string
-	Branch string
-	Log    string
-	Num    int
-}
+type workspace = workspaces.Workspace
 
 var errUsage = errors.New("usage")
 
@@ -261,25 +249,7 @@ pre() {
 }
 
 func loadConfig() (config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return config{}, err
-	}
-
-	root := os.Getenv("PRE_ROOT")
-	if root == "" {
-		root = filepath.Join(home, "local", "work")
-	}
-	if strings.HasPrefix(root, "~/") {
-		root = filepath.Join(home, root[2:])
-	}
-
-	project := os.Getenv("PRE_PROJECT")
-	if project == "" {
-		project = "ops"
-	}
-
-	return config{Root: root, Project: project}, nil
+	return workspaces.LoadConfig()
 }
 
 func listCommand(cfg config) error {
@@ -306,22 +276,6 @@ func printWorkspaceList(workspaces []workspace) error {
 	}
 
 	return nil
-}
-
-type workspaceItem struct {
-	workspace workspace
-}
-
-func (w workspaceItem) Title() string {
-	return formatWorkspaceDisplay(w.workspace, colorEnabledFor(os.Stderr))
-}
-
-func (w workspaceItem) Description() string {
-	return ""
-}
-
-func (w workspaceItem) FilterValue() string {
-	return strings.Join([]string{w.workspace.Name, w.workspace.Branch, w.workspace.Path}, " ")
 }
 
 func formatWorkspaceDisplay(ws workspace, color bool) string {
@@ -386,215 +340,19 @@ func colorize(value string, ansiColor string) string {
 	return ansiColor + value + ansiReset
 }
 
-type pickerModel struct {
-	cfg              config
-	list             list.Model
-	selected         string
-	cancelled        bool
-	actionMode       bool
-	actionTarget     workspace
-	confirmingDelete bool
-	deleteTarget     workspace
-	notice           string
-}
-
-func newPickerModel(cfg config, workspaces []workspace) pickerModel {
-	items := itemsFromWorkspaces(workspaces)
-
-	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = false
-	delegate.SetHeight(1)
-	delegate.SetSpacing(0)
-	l := list.New(items, delegate, 80, 16)
-	l.Title = "Choose workspace (enter=actions, d/x=delete, q=quit)"
-	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false)
-	l.SetShowPagination(false)
-	l.SetShowHelp(false)
-
-	m := pickerModel{cfg: cfg, list: l}
-	m.refreshTitle()
-	return m
-}
-
-func (m *pickerModel) refreshTitle() {
-	if m.confirmingDelete {
-		m.list.Title = "Delete? y=yes n=no f=force"
-		return
+func detectCurrentWorkspaceIndex(workspaces []workspace) int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return -1
 	}
 
-	if m.actionMode {
-		m.list.Title = "Action: enter/o=open d/x=delete n/q=cancel"
-		return
-	}
-
-	if m.notice != "" {
-		m.list.Title = "Notice: " + truncateWithDots(m.notice, 40)
-		return
-	}
-
-	m.list.Title = "Choose workspace (enter=actions, d/x=delete, q=quit)"
-}
-
-func itemsFromWorkspaces(workspaces []workspace) []list.Item {
-	items := make([]list.Item, 0, len(workspaces))
-	for _, ws := range workspaces {
-		items = append(items, workspaceItem{workspace: ws})
-	}
-	return items
-}
-
-func (m pickerModel) Init() tea.Cmd {
-	return nil
-}
-
-func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if m.actionMode {
-			switch {
-			case isEnterKey(msg) || isOpenKey(msg):
-				m.selected = m.actionTarget.Path
-				m.actionMode = false
-				m.refreshTitle()
-				return m, tea.Quit
-			case isDeleteRequest(msg):
-				m.confirmingDelete = true
-				m.deleteTarget = m.actionTarget
-				m.actionMode = false
-				m.notice = ""
-				m.refreshTitle()
-				return m, nil
-			case isNoKey(msg):
-				m.actionMode = false
-				m.notice = "action cancelled"
-				m.refreshTitle()
-				return m, nil
-			}
-
-			return m, nil
+	for idx, ws := range workspaces {
+		if cwd == ws.Path || strings.HasPrefix(cwd, ws.Path+string(filepath.Separator)) {
+			return idx
 		}
-
-		if m.confirmingDelete {
-			switch {
-			case isYesKey(msg):
-				if err := removeWorkspacePath(m.cfg, m.deleteTarget.Path, false); err != nil {
-					m.notice = fmt.Sprintf("delete failed: %s", truncateWithDots(err.Error(), 80))
-				} else {
-					m.notice = fmt.Sprintf("removed %s", m.deleteTarget.Name)
-					if refreshed, err := collectWorkspaces(m.cfg); err == nil {
-						m.list.SetItems(itemsFromWorkspaces(refreshed))
-					}
-				}
-				m.confirmingDelete = false
-				m.refreshTitle()
-				return m, nil
-			case isForceKey(msg):
-				if err := removeWorkspacePath(m.cfg, m.deleteTarget.Path, true); err != nil {
-					m.notice = fmt.Sprintf("force delete failed: %s", truncateWithDots(err.Error(), 80))
-				} else {
-					m.notice = fmt.Sprintf("removed %s (forced)", m.deleteTarget.Name)
-					if refreshed, err := collectWorkspaces(m.cfg); err == nil {
-						m.list.SetItems(itemsFromWorkspaces(refreshed))
-					}
-				}
-				m.confirmingDelete = false
-				m.refreshTitle()
-				return m, nil
-			case isNoKey(msg):
-				m.confirmingDelete = false
-				m.notice = "delete cancelled"
-				m.refreshTitle()
-				return m, nil
-			}
-			return m, nil
-		}
-
-		switch {
-		case isEnterKey(msg):
-			selected, ok := m.list.SelectedItem().(workspaceItem)
-			if ok {
-				m.actionMode = true
-				m.actionTarget = selected.workspace
-				m.notice = ""
-				m.refreshTitle()
-			} else {
-				m.notice = "no workspace selected"
-				m.refreshTitle()
-			}
-			return m, nil
-		case isQuitKey(msg):
-			m.cancelled = true
-			return m, tea.Quit
-		}
-
-		if isDeleteRequest(msg) {
-			selected, ok := m.list.SelectedItem().(workspaceItem)
-			if ok {
-				m.confirmingDelete = true
-				m.deleteTarget = selected.workspace
-				m.notice = ""
-				m.refreshTitle()
-			} else {
-				m.notice = "no workspace selected"
-				m.refreshTitle()
-			}
-			return m, nil
-		}
-	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width, msg.Height)
 	}
 
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	return m, cmd
-}
-
-func (m pickerModel) View() string {
-	return m.list.View()
-}
-
-func isEnterKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyEnter || strings.EqualFold(msg.String(), "enter")
-}
-
-func isOpenKey(msg tea.KeyMsg) bool {
-	return isRuneKey(msg, 'o')
-}
-
-func isQuitKey(msg tea.KeyMsg) bool {
-	key := strings.ToLower(msg.String())
-	return key == "q" || key == "esc" || key == "ctrl+c"
-}
-
-func isDeleteRequest(msg tea.KeyMsg) bool {
-	switch msg.Type {
-	case tea.KeyCtrlD, tea.KeyDelete, tea.KeyBackspace:
-		return true
-	}
-
-	return isRuneKey(msg, 'd') || isRuneKey(msg, 'x') || strings.EqualFold(msg.String(), "delete") || strings.EqualFold(msg.String(), "ctrl+d")
-}
-
-func isYesKey(msg tea.KeyMsg) bool {
-	return isRuneKey(msg, 'y') || strings.EqualFold(msg.String(), "yes")
-}
-
-func isNoKey(msg tea.KeyMsg) bool {
-	key := strings.ToLower(msg.String())
-	return isRuneKey(msg, 'n') || key == "no" || key == "q" || key == "esc" || key == "ctrl+c"
-}
-
-func isForceKey(msg tea.KeyMsg) bool {
-	return isRuneKey(msg, 'f') || strings.EqualFold(msg.String(), "force")
-}
-
-func isRuneKey(msg tea.KeyMsg, expected rune) bool {
-	if msg.Type != tea.KeyRunes || len(msg.Runes) == 0 {
-		return false
-	}
-
-	return unicode.ToLower(msg.Runes[0]) == unicode.ToLower(expected)
+	return -1
 }
 
 func selectWorkspaceInteractive(cfg config, workspaces []workspace) (string, error) {
@@ -602,88 +360,504 @@ func selectWorkspaceInteractive(cfg config, workspaces []workspace) (string, err
 		return "", printWorkspaceList(workspaces)
 	}
 
-	program := tea.NewProgram(newPickerModel(cfg, workspaces), tea.WithInputTTY(), tea.WithOutput(os.Stderr))
-	result, err := program.Run()
+	controller, err := newPickerController(cfg, workspaces)
 	if err != nil {
 		return "", err
 	}
 
-	model, ok := result.(pickerModel)
-	if !ok {
-		return "", fmt.Errorf("unexpected picker model type")
+	if err := controller.ui.Run(); err != nil {
+		return "", err
 	}
 
-	if model.cancelled || model.selected == "" {
+	if controller.cancelled || controller.selected == "" {
 		return "", nil
 	}
 
-	return model.selected, nil
+	return controller.selected, nil
+}
+
+type pickerController struct {
+	cfg        config
+	ui         *z.UI
+	meta       *z.Static
+	list       *z.List
+	listMeta   *z.Static
+	name       *z.Static
+	summary    *z.Static
+	path       *z.Static
+	branch     *z.Static
+	commit     *z.Static
+	cwd        *z.Static
+	notice     *z.Static
+	footer     *z.Static
+	workspaces []workspace
+	current    int
+	selected   string
+	cancelled  bool
+}
+
+func newPickerController(cfg config, workspaces []workspace) (*pickerController, error) {
+	currentIndex := detectCurrentWorkspaceIndex(workspaces)
+	builder := z.NewBuilder(z.TokyoNightTheme())
+	builder.
+		Flex("picker-root", false, "stretch", 1).Padding(1, 2).
+		Flex("picker-header", false, "stretch", 0).Border("round").Padding(1, 2).
+		Static("picker-title", "pre").Font("bold").Foreground("$cyan").
+		Static("picker-subtitle", "workspace TUI for git worktrees").Foreground("$fg1").
+		Static("picker-meta", "").Foreground("$gray").
+		End().
+		Grid("picker-main", 1, 2, false).Hint(0, -1).Columns(34, -1).
+		Cell(0, 0, 1, 1).
+		Flex("picker-list-pane", false, "stretch", 1).Border("round").Padding(1, 1).
+		Static("picker-list-title", "Workspaces").Font("bold").
+		Static("picker-list-meta", "").Foreground("$gray").
+		List("picker-list", workspaceLines(workspaces, currentIndex)...).Hint(0, -1).
+		End().
+		Cell(1, 0, 1, 1).
+		Flex("picker-detail-pane", false, "stretch", 1).Border("round").Padding(1, 2).
+		Static("picker-name", "").Font("bold").Foreground("$cyan").
+		Static("picker-summary", "").Foreground("$fg1").
+		HRule("thin").
+		Static("picker-path", "").
+		Static("picker-branch", "").
+		Static("picker-commit", "").
+		Static("picker-cwd", "").Foreground("$gray").
+		HRule("thin").
+		Flex("picker-actions", true, "start", 2).
+		Button("picker-open", "Open").
+		Button("picker-delete", "Delete").
+		Button("picker-refresh", "Refresh").
+		Button("picker-quit", "Quit").
+		End().
+		End().
+		End().
+		Static("picker-notice", "").Foreground("$yellow").
+		Static("picker-footer", "Enter/o open  a actions  d/x delete  r refresh  Tab move focus  q quit").Foreground("$gray").
+		End()
+
+	ui := builder.Build()
+	controller := &pickerController{
+		cfg:        cfg,
+		ui:         ui,
+		meta:       z.Find(ui, "picker-meta").(*z.Static),
+		list:       z.Find(ui, "picker-list").(*z.List),
+		listMeta:   z.Find(ui, "picker-list-meta").(*z.Static),
+		name:       z.Find(ui, "picker-name").(*z.Static),
+		summary:    z.Find(ui, "picker-summary").(*z.Static),
+		path:       z.Find(ui, "picker-path").(*z.Static),
+		branch:     z.Find(ui, "picker-branch").(*z.Static),
+		commit:     z.Find(ui, "picker-commit").(*z.Static),
+		cwd:        z.Find(ui, "picker-cwd").(*z.Static),
+		notice:     z.Find(ui, "picker-notice").(*z.Static),
+		footer:     z.Find(ui, "picker-footer").(*z.Static),
+		workspaces: workspaces,
+		current:    currentIndex,
+	}
+
+	z.OnSelect(controller.list, func(_ z.Widget, index int) bool {
+		controller.updateSelection(index)
+		return true
+	})
+	z.OnActivate(controller.list, func(_ z.Widget, index int) bool {
+		controller.openWorkspace(index)
+		return true
+	})
+	z.OnKey(controller.list, controller.handleListKey)
+	z.Find(ui, "picker-open").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		controller.openWorkspace(controller.list.Selected())
+		return true
+	})
+	z.Find(ui, "picker-delete").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		controller.openDeleteDialog()
+		return true
+	})
+	z.Find(ui, "picker-refresh").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		controller.refreshWorkspaces(controller.list.Selected())
+		return true
+	})
+	z.Find(ui, "picker-quit").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		controller.cancelled = true
+		controller.ui.Quit()
+		return true
+	})
+
+	if currentIndex >= 0 {
+		controller.list.Select(currentIndex)
+	} else {
+		controller.list.Select(0)
+	}
+	controller.refreshMeta()
+	controller.updateSelection(controller.list.Selected())
+
+	return controller, nil
+}
+
+func workspaceLines(workspaces []workspace, currentIndex int) []string {
+	lines := make([]string, 0, len(workspaces))
+	for idx, ws := range workspaces {
+		prefix := "  "
+		if idx == currentIndex {
+			prefix = "* "
+		}
+		lines = append(lines, prefix+formatWorkspaceDisplay(ws, false))
+	}
+	return lines
+}
+
+func (c *pickerController) handleListKey(_ z.Widget, ev *tcell.EventKey) bool {
+	switch {
+	case isOpenKey(ev):
+		c.openWorkspace(c.list.Selected())
+		return true
+	case isActionKey(ev):
+		c.openActionsDialog()
+		return true
+	case isDeleteRequest(ev):
+		c.openDeleteDialog()
+		return true
+	case isRefreshKey(ev):
+		c.refreshWorkspaces(c.list.Selected())
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *pickerController) currentWorkspace() (workspace, int, bool) {
+	index := c.list.Selected()
+	if index < 0 || index >= len(c.workspaces) {
+		return workspace{}, -1, false
+	}
+	return c.workspaces[index], index, true
+}
+
+func (c *pickerController) openWorkspace(index int) {
+	if index < 0 || index >= len(c.workspaces) {
+		c.setNotice("no workspace selected")
+		return
+	}
+
+	c.selected = c.workspaces[index].Path
+	c.cancelled = false
+	c.ui.Quit()
+}
+
+func (c *pickerController) refreshMeta() {
+	current := "outside workspace"
+	if c.current >= 0 && c.current < len(c.workspaces) {
+		current = c.workspaces[c.current].Name
+	}
+
+	setStaticText(c.meta, fmt.Sprintf("project=%s  root=%s  workspaces=%d  current=%s", c.cfg.Project, truncateWithDots(c.cfg.Root, 36), len(c.workspaces), current))
+	setStaticText(c.listMeta, fmt.Sprintf("%d entries  |  * current cwd", len(c.workspaces)))
+}
+
+func (c *pickerController) openActionsDialog() {
+	ws, _, ok := c.currentWorkspace()
+	if !ok {
+		c.setNotice("no workspace selected")
+		return
+	}
+
+	builder := z.NewBuilder(c.ui.Theme())
+	builder.
+		Dialog("picker-actions", "Workspace actions").
+		Flex("picker-actions-body", false, "stretch", 1).Padding(0, 1).
+		Static("picker-actions-name", ws.Name).Font("bold").
+		Static("picker-actions-path", truncateWithDots(ws.Path, 72)).Foreground("$fg1").
+		Flex("picker-actions-buttons", true, "end", 2).
+		Button("picker-actions-open", "Open").
+		Button("picker-actions-delete", "Delete").
+		Button("picker-actions-cancel", "Cancel").
+		End().
+		End()
+
+	dialog := builder.Container()
+	z.OnKey(dialog, func(_ z.Widget, ev *tcell.EventKey) bool {
+		switch {
+		case isEnterKey(ev), isOpenKey(ev):
+			c.ui.Close()
+			c.openWorkspace(c.list.Selected())
+			return true
+		case isDeleteRequest(ev):
+			c.ui.Close()
+			c.openDeleteDialog()
+			return true
+		case isCancelKey(ev):
+			c.ui.Close()
+			c.setNotice("action cancelled")
+			return true
+		default:
+			return false
+		}
+	})
+	z.Find(dialog, "picker-actions-open").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		c.ui.Close()
+		c.openWorkspace(c.list.Selected())
+		return true
+	})
+	z.Find(dialog, "picker-actions-delete").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		c.ui.Close()
+		c.openDeleteDialog()
+		return true
+	})
+	z.Find(dialog, "picker-actions-cancel").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		c.ui.Close()
+		c.setNotice("action cancelled")
+		return true
+	})
+
+	c.ui.Popup(-1, -1, 0, 0, dialog)
+}
+
+func (c *pickerController) openDeleteDialog() {
+	ws, index, ok := c.currentWorkspace()
+	if !ok {
+		c.setNotice("no workspace selected")
+		return
+	}
+
+	builder := z.NewBuilder(c.ui.Theme())
+	builder.
+		Dialog("picker-delete", "Remove workspace?").
+		Flex("picker-delete-body", false, "stretch", 1).Padding(0, 1).
+		Static("picker-delete-name", ws.Name).Font("bold").
+		Static("picker-delete-branch", fmt.Sprintf("branch: %s", fallbackWorkspaceBranch(ws))).Foreground("$fg1").
+		Static("picker-delete-log", truncateWithDots(ws.Log, 72)).Foreground("$fg1").
+		Static("picker-delete-path", truncateWithDots(ws.Path, 72)).Foreground("$fg1").
+		Flex("picker-delete-buttons", true, "end", 2).
+		Button("picker-delete-remove", "Remove").
+		Button("picker-delete-force", "Force").
+		Button("picker-delete-cancel", "Cancel").
+		End().
+		End()
+
+	dialog := builder.Container()
+	perform := func(force bool) bool {
+		c.ui.Close()
+		c.removeWorkspace(ws, index, force)
+		return true
+	}
+	z.OnKey(dialog, func(_ z.Widget, ev *tcell.EventKey) bool {
+		switch {
+		case isEnterKey(ev), isYesKey(ev):
+			return perform(false)
+		case isForceKey(ev):
+			return perform(true)
+		case isCancelKey(ev):
+			c.ui.Close()
+			c.setNotice("delete cancelled")
+			return true
+		default:
+			return false
+		}
+	})
+	z.Find(dialog, "picker-delete-remove").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		return perform(false)
+	})
+	z.Find(dialog, "picker-delete-force").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		return perform(true)
+	})
+	z.Find(dialog, "picker-delete-cancel").On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		c.ui.Close()
+		c.setNotice("delete cancelled")
+		return true
+	})
+
+	c.ui.Popup(-1, -1, 0, 0, dialog)
+}
+
+func (c *pickerController) removeWorkspace(ws workspace, index int, force bool) {
+	if err := removeWorkspacePath(c.cfg, ws.Path, force); err != nil {
+		prefix := "delete failed"
+		if force {
+			prefix = "force delete failed"
+		}
+		c.setNotice(fmt.Sprintf("%s: %s", prefix, truncateWithDots(err.Error(), 72)))
+		return
+	}
+
+	refreshed, err := collectWorkspaces(c.cfg)
+	if err != nil {
+		c.setNotice(fmt.Sprintf("removed %s; refresh failed: %s", ws.Name, truncateWithDots(err.Error(), 48)))
+		return
+	}
+
+	c.workspaces = refreshed
+	c.current = detectCurrentWorkspaceIndex(refreshed)
+	c.list.SetItems(workspaceLines(refreshed, c.current))
+	c.refreshMeta()
+	if len(refreshed) == 0 {
+		c.updateSelection(-1)
+		if force {
+			c.setNotice(fmt.Sprintf("removed %s (forced)", ws.Name))
+		} else {
+			c.setNotice(fmt.Sprintf("removed %s", ws.Name))
+		}
+		return
+	}
+
+	if index >= len(refreshed) {
+		index = len(refreshed) - 1
+	}
+	c.list.Select(index)
+	c.updateSelection(index)
+	if force {
+		c.setNotice(fmt.Sprintf("removed %s (forced)", ws.Name))
+	} else {
+		c.setNotice(fmt.Sprintf("removed %s", ws.Name))
+	}
+}
+
+func (c *pickerController) refreshWorkspaces(preferredIndex int) {
+	refreshed, err := collectWorkspaces(c.cfg)
+	if err != nil {
+		c.setNotice(fmt.Sprintf("refresh failed: %s", truncateWithDots(err.Error(), 64)))
+		return
+	}
+
+	c.workspaces = refreshed
+	c.current = detectCurrentWorkspaceIndex(refreshed)
+	c.list.SetItems(workspaceLines(refreshed, c.current))
+	c.refreshMeta()
+	if len(refreshed) == 0 {
+		c.updateSelection(-1)
+		c.setNotice("no workspaces found")
+		return
+	}
+
+	if preferredIndex < 0 {
+		preferredIndex = 0
+	}
+	if preferredIndex >= len(refreshed) {
+		preferredIndex = len(refreshed) - 1
+	}
+	c.list.Select(preferredIndex)
+	c.updateSelection(preferredIndex)
+	c.setNotice("workspace list refreshed")
+}
+
+func (c *pickerController) updateSelection(index int) {
+	if index < 0 || index >= len(c.workspaces) {
+		setStaticText(c.name, "No workspace selected")
+		setStaticText(c.summary, "Pick workspace from left pane")
+		setStaticText(c.path, "path: -")
+		setStaticText(c.branch, "branch: -")
+		setStaticText(c.commit, "commit: -")
+		setStaticText(c.cwd, "cwd: -")
+		setStaticText(c.footer, "Enter/o open  a actions  d/x delete  q quit")
+		return
+	}
+
+	ws := c.workspaces[index]
+	state := fmt.Sprintf("suffix=%02d", ws.Num)
+	if index == c.current {
+		state += "  |  current cwd"
+	}
+	setStaticText(c.name, ws.Name)
+	setStaticText(c.summary, state)
+	setStaticText(c.path, fmt.Sprintf("path: %s", truncateWithDots(ws.Path, 68)))
+	setStaticText(c.branch, fmt.Sprintf("branch: %s", truncateWithDots(fallbackWorkspaceBranch(ws), 68)))
+	setStaticText(c.commit, fmt.Sprintf("commit: %s", truncateWithDots(fallbackWorkspaceLog(ws), 68)))
+	setStaticText(c.cwd, fmt.Sprintf("cwd: %s", currentWorkspaceLabel(index == c.current)))
+	setStaticText(c.footer, "Enter/o open  a actions  d/x delete  r refresh  Tab move focus  q quit")
+}
+
+func (c *pickerController) setNotice(message string) {
+	setStaticText(c.notice, message)
+}
+
+func setStaticText(label *z.Static, text string) {
+	label.SetText(text)
+	label.Refresh()
+}
+
+func fallbackWorkspaceBranch(ws workspace) string {
+	if ws.Branch == "" {
+		return "unknown"
+	}
+	return ws.Branch
+}
+
+func fallbackWorkspaceLog(ws workspace) string {
+	if ws.Log == "" {
+		return "no commits"
+	}
+	return truncateWithDots(ws.Log, 52)
+}
+
+func currentWorkspaceLabel(current bool) string {
+	if current {
+		return "selected workspace contains current shell"
+	}
+	return "selected workspace is not current shell"
+}
+
+func isOpenKey(ev *tcell.EventKey) bool {
+	return isRuneKey(ev, 'o')
+}
+
+func isEnterKey(ev *tcell.EventKey) bool {
+	return ev.Key() == tcell.KeyEnter || strings.EqualFold(ev.Name(), "Enter")
+}
+
+func isActionKey(ev *tcell.EventKey) bool {
+	return isRuneKey(ev, 'a')
+}
+
+func isDeleteRequest(ev *tcell.EventKey) bool {
+	switch ev.Key() {
+	case tcell.KeyCtrlD, tcell.KeyDelete, tcell.KeyBackspace, tcell.KeyBackspace2:
+		return true
+	}
+
+	return isRuneKey(ev, 'd') || isRuneKey(ev, 'x')
+}
+
+func isRefreshKey(ev *tcell.EventKey) bool {
+	return isRuneKey(ev, 'r')
+}
+
+func isYesKey(ev *tcell.EventKey) bool {
+	return isRuneKey(ev, 'y')
+}
+
+func isForceKey(ev *tcell.EventKey) bool {
+	return isRuneKey(ev, 'f')
+}
+
+func isCancelKey(ev *tcell.EventKey) bool {
+	if isRuneKey(ev, 'n') || isRuneKey(ev, 'q') {
+		return true
+	}
+
+	switch ev.Key() {
+	case tcell.KeyEscape, tcell.KeyCtrlC:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRuneKey(ev *tcell.EventKey, expected rune) bool {
+	if ev.Key() != tcell.KeyRune {
+		return false
+	}
+
+	runes := []rune(ev.Str())
+	if len(runes) == 0 {
+		return false
+	}
+
+	return strings.EqualFold(ev.Str(), string(expected))
 }
 
 func switchPathCommand(cfg config, target string) (string, error) {
-	workspaces, err := collectWorkspaces(cfg)
-	if err != nil {
-		return "", err
-	}
-
-	name, err := normalizeTarget(cfg.Project, target)
-	if err != nil {
-		return "", err
-	}
-
-	for _, ws := range workspaces {
-		if ws.Name == name {
-			return ws.Path, nil
-		}
-	}
-
-	return "", fmt.Errorf("no workspace found for %q", target)
+	return workspaces.SwitchPath(cfg, target)
 }
 
 func newCommand(cfg config, rawRef string) (string, error) {
-	baseRepoPath := filepath.Join(cfg.Root, cfg.Project)
-	stat, err := os.Stat(baseRepoPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("base repo not found: %s", baseRepoPath)
-		}
-		return "", err
-	}
-	if !stat.IsDir() {
-		return "", fmt.Errorf("base repo path is not a directory: %s", baseRepoPath)
-	}
-
-	workspaces, err := collectWorkspaces(cfg)
-	if err != nil {
-		return "", err
-	}
-
-	next := 1
-	for _, ws := range workspaces {
-		if ws.Num >= next {
-			next = ws.Num + 1
-		}
-	}
-
-	newName := fmt.Sprintf("%s-%02d", cfg.Project, next)
-	newPath := filepath.Join(cfg.Root, newName)
-	if _, err := os.Stat(newPath); err == nil {
-		return "", fmt.Errorf("workspace already exists: %s", newPath)
-	}
-
-	baseRef := resolveBaseRef(rawRef)
-	if err := verifyRefExists(baseRepoPath, baseRef); err != nil {
-		return "", err
-	}
-
-	cmd := exec.Command("git", "-C", baseRepoPath, "worktree", "add", newPath, baseRef)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-
-	return newPath, nil
+	return workspaces.CreateNext(cfg, rawRef)
 }
 
 func parseRemoveArgs(args []string) (string, bool, bool, error) {
@@ -721,31 +895,8 @@ func removeCommand(cfg config, rawTarget string, confirm bool, force bool) error
 		return fmt.Errorf("refusing to remove %q without confirmation; rerun with --yes", rawTarget)
 	}
 
-	name, err := normalizeTarget(cfg.Project, rawTarget)
+	target, err := workspaces.Remove(cfg, rawTarget, force)
 	if err != nil {
-		return err
-	}
-
-	workspaces, err := collectWorkspaces(cfg)
-	if err != nil {
-		return err
-	}
-
-	var target workspace
-	found := false
-	for _, ws := range workspaces {
-		if ws.Name == name {
-			target = ws
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return fmt.Errorf("no workspace found for %q", rawTarget)
-	}
-
-	if err := removeWorkspacePath(cfg, target.Path, force); err != nil {
 		if !force {
 			return fmt.Errorf("%w (retry with --force to remove a dirty worktree)", err)
 		}
@@ -757,39 +908,11 @@ func removeCommand(cfg config, rawTarget string, confirm bool, force bool) error
 }
 
 func removeWorkspacePath(cfg config, workspacePath string, force bool) error {
-	baseRepoPath := filepath.Join(cfg.Root, cfg.Project)
-	gitArgs := []string{"-C", baseRepoPath, "worktree", "remove"}
-	if force {
-		gitArgs = append(gitArgs, "--force")
-	}
-	gitArgs = append(gitArgs, workspacePath)
-
-	cmd := exec.Command("git", gitArgs...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
-			return errors.New(msg)
-		}
-		return err
-	}
-
-	return nil
+	return workspaces.RemovePath(cfg, workspacePath, force)
 }
 
 func resolveBaseRef(rawRef string) string {
-	if rawRef == "" {
-		return "origin/main"
-	}
-
-	if strings.HasPrefix(rawRef, "origin/") ||
-		strings.HasPrefix(rawRef, "refs/") ||
-		strings.HasPrefix(rawRef, "HEAD") ||
-		strings.HasPrefix(rawRef, "remotes/") {
-		return rawRef
-	}
-
-	return "origin/" + rawRef
+	return workspaces.ResolveBaseRef(rawRef)
 }
 
 func verifyRefExists(repoPath, ref string) error {
@@ -801,55 +924,7 @@ func verifyRefExists(repoPath, ref string) error {
 }
 
 func collectWorkspaces(cfg config) ([]workspace, error) {
-	stat, err := os.Stat(cfg.Root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("workspace root not found: %s", cfg.Root)
-		}
-		return nil, err
-	}
-	if !stat.IsDir() {
-		return nil, fmt.Errorf("workspace root is not a directory: %s", cfg.Root)
-	}
-
-	entries, err := os.ReadDir(cfg.Root)
-	if err != nil {
-		return nil, err
-	}
-
-	pattern := regexp.MustCompile("^" + regexp.QuoteMeta(cfg.Project) + `-(\d{2})$`)
-	var workspaces []workspace
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		matches := pattern.FindStringSubmatch(entry.Name())
-		if len(matches) != 2 {
-			continue
-		}
-
-		num, err := strconv.Atoi(matches[1])
-		if err != nil {
-			continue
-		}
-
-		path := filepath.Join(cfg.Root, entry.Name())
-		workspaces = append(workspaces, workspace{
-			Name:   entry.Name(),
-			Path:   path,
-			Branch: branchOrSHA(path),
-			Log:    lastCommitLine(path),
-			Num:    num,
-		})
-	}
-
-	sort.Slice(workspaces, func(i, j int) bool {
-		return workspaces[i].Num < workspaces[j].Num
-	})
-
-	return workspaces, nil
+	return workspaces.Collect(cfg)
 }
 
 func branchOrSHA(repoPath string) string {
@@ -886,20 +961,7 @@ func gitOutput(repoPath string, args ...string) (string, error) {
 }
 
 func normalizeTarget(project, target string) (string, error) {
-	if len(target) == 1 && target[0] >= '0' && target[0] <= '9' {
-		return fmt.Sprintf("%s-0%s", project, target), nil
-	}
-
-	if len(target) == 2 && isAllDigits(target) {
-		return fmt.Sprintf("%s-%s", project, target), nil
-	}
-
-	pattern := regexp.MustCompile("^" + regexp.QuoteMeta(project) + `-(\d{2})$`)
-	if pattern.MatchString(target) {
-		return target, nil
-	}
-
-	return "", fmt.Errorf("expected 1-2 digits or %s-XX", project)
+	return workspaces.NormalizeTarget(project, target)
 }
 
 func isAllDigits(s string) bool {
