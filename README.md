@@ -41,8 +41,6 @@ source ~/.functions.sh
 
 This installs a `pre()` shell wrapper in `~/.functions.sh` so commands like `pre 08` navigate correctly.
 
-In this dotfiles setup, `wt` is an alias to `pre`.
-
 ## Configuration
 
 Environment variables:
