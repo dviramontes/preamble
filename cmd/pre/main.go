@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dviramontes/preamble/internal/workspaces"
 	"github.com/gdamore/tcell/v3"
@@ -392,6 +393,7 @@ type pickerController struct {
 	footer     *z.Static
 	workspaces []workspace
 	current    int
+	deleting   bool
 	selected   string
 	cancelled  bool
 }
@@ -402,7 +404,7 @@ func newPickerController(cfg config, workspaces []workspace) (*pickerController,
 	builder.
 		Flex("picker-root", false, "stretch", 1).Padding(1, 2).
 		Flex("picker-header", false, "stretch", 0).Border("round").Padding(1, 2).
-		Static("picker-title", "pre").Font("bold").Foreground("$cyan").
+		Static("picker-title", "pre-amble").Font("bold").Foreground("$cyan").
 		Static("picker-subtitle", "workspace TUI for git worktrees").Foreground("$fg1").
 		Static("picker-meta", "").Foreground("$gray").
 		End().
@@ -599,12 +601,36 @@ func (c *pickerController) openActionsDialog() {
 		c.openWorkspace(c.list.Selected())
 		return true
 	})
+	z.OnKey(openButton, func(_ z.Widget, ev *tcell.EventKey) bool {
+		if !isEnterKey(ev) {
+			return false
+		}
+		c.ui.Close()
+		c.openWorkspace(c.list.Selected())
+		return true
+	})
 	deleteButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		c.ui.Close()
 		c.openDeleteDialog()
 		return true
 	})
+	z.OnKey(deleteButton, func(_ z.Widget, ev *tcell.EventKey) bool {
+		if !isEnterKey(ev) {
+			return false
+		}
+		c.ui.Close()
+		c.openDeleteDialog()
+		return true
+	})
 	cancelButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		c.ui.Close()
+		c.setNotice("action cancelled")
+		return true
+	})
+	z.OnKey(cancelButton, func(_ z.Widget, ev *tcell.EventKey) bool {
+		if !isEnterKey(ev) {
+			return false
+		}
 		c.ui.Close()
 		c.setNotice("action cancelled")
 		return true
@@ -642,7 +668,7 @@ func (c *pickerController) openDeleteDialog() {
 	cancelButton := z.Find(dialog, "picker-delete-cancel")
 	perform := func(force bool) bool {
 		c.ui.Close()
-		c.removeWorkspace(ws, index, force)
+		c.removeWorkspaceAsync(ws, index, force)
 		return true
 	}
 	z.OnKey(dialog, func(_ z.Widget, ev *tcell.EventKey) bool {
@@ -662,7 +688,19 @@ func (c *pickerController) openDeleteDialog() {
 	removeButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
 		return perform(false)
 	})
+	z.OnKey(removeButton, func(_ z.Widget, ev *tcell.EventKey) bool {
+		if !isEnterKey(ev) {
+			return false
+		}
+		return perform(false)
+	})
 	forceButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
+		return perform(true)
+	})
+	z.OnKey(forceButton, func(_ z.Widget, ev *tcell.EventKey) bool {
+		if !isEnterKey(ev) {
+			return false
+		}
 		return perform(true)
 	})
 	cancelButton.On(z.EvtActivate, func(_ z.Widget, _ z.Event, _ ...any) bool {
@@ -670,9 +708,98 @@ func (c *pickerController) openDeleteDialog() {
 		c.setNotice("delete cancelled")
 		return true
 	})
+	z.OnKey(cancelButton, func(_ z.Widget, ev *tcell.EventKey) bool {
+		if !isEnterKey(ev) {
+			return false
+		}
+		c.ui.Close()
+		c.setNotice("delete cancelled")
+		return true
+	})
 
 	c.ui.Popup(-1, -1, 0, 0, dialog)
 	c.ui.Focus(removeButton)
+}
+
+func (c *pickerController) removeWorkspaceAsync(ws workspace, index int, force bool) {
+	if c.deleting {
+		c.setNotice("delete already in progress")
+		return
+	}
+
+	c.deleting = true
+	spinner, progressDialog := c.showDeleteProgress(ws, force)
+	go func() {
+		defer spinner.Stop()
+		defer func() {
+			c.deleting = false
+			c.ui.Close()
+		}()
+
+		if err := removeWorkspacePath(c.cfg, ws.Path, force); err != nil {
+			prefix := "delete failed"
+			if force {
+				prefix = "force delete failed"
+			}
+			setStaticText(z.Find(progressDialog, "picker-progress-message").(*z.Static), fmt.Sprintf("%s: %s", prefix, truncateWithDots(err.Error(), 72)))
+			c.setNotice(fmt.Sprintf("%s: %s", prefix, truncateWithDots(err.Error(), 72)))
+			return
+		}
+
+		setStaticText(z.Find(progressDialog, "picker-progress-message").(*z.Static), fmt.Sprintf("removed %s, refreshing list...", ws.Name))
+		refreshed, err := collectWorkspaces(c.cfg)
+		if err != nil {
+			c.setNotice(fmt.Sprintf("removed %s; refresh failed: %s", ws.Name, truncateWithDots(err.Error(), 48)))
+			return
+		}
+
+		c.workspaces = refreshed
+		c.current = detectCurrentWorkspaceIndex(refreshed)
+		c.list.SetItems(workspaceLines(refreshed, c.current))
+		c.refreshMeta()
+		if len(refreshed) == 0 {
+			c.updateSelection(-1)
+			if force {
+				c.setNotice(fmt.Sprintf("removed %s (forced)", ws.Name))
+			} else {
+				c.setNotice(fmt.Sprintf("removed %s", ws.Name))
+			}
+			return
+		}
+
+		if index >= len(refreshed) {
+			index = len(refreshed) - 1
+		}
+		c.list.Select(index)
+		c.updateSelection(index)
+		if force {
+			c.setNotice(fmt.Sprintf("removed %s (forced)", ws.Name))
+		} else {
+			c.setNotice(fmt.Sprintf("removed %s", ws.Name))
+		}
+	}()
+}
+
+func (c *pickerController) showDeleteProgress(ws workspace, force bool) (*z.Spinner, z.Container) {
+	message := fmt.Sprintf("Deleting %s...", ws.Name)
+	if force {
+		message = fmt.Sprintf("Force deleting %s...", ws.Name)
+	}
+
+	builder := z.NewBuilder(c.ui.Theme())
+	builder.
+		Dialog("picker-progress", "Working").
+		Flex("picker-progress-body", false, "stretch", 1).Padding(0, 2).
+		Spinner("picker-progress-spinner", "dots").
+		Static("picker-progress-message", message).Foreground("$fg1").
+		Static("picker-progress-path", truncateWithDots(ws.Path, 72)).Foreground("$gray").
+		End()
+
+	dialog := builder.Container()
+	spinner := z.Find(dialog, "picker-progress-spinner").(*z.Spinner)
+	spinner.Start(90 * time.Millisecond)
+	c.ui.Popup(-1, -1, 0, 0, dialog)
+	return spinner, dialog
 }
 
 func (c *pickerController) removeWorkspace(ws workspace, index int, force bool) {
