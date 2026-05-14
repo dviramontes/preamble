@@ -40,3 +40,47 @@ func TestParseRemoveArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatWorkspaceDisplayShowsDirtyMarker(t *testing.T) {
+	ws := workspace{
+		Name:   "project-08",
+		Branch: "feature",
+		Log:    "last commit",
+		Dirty:  true,
+	}
+
+	got := formatWorkspaceDisplay(ws, false)
+	want := `/\ 08 -> feature`
+	if got != want {
+		t.Fatalf("formatWorkspaceDisplay() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatWorkspaceDisplayKeepsCleanRowsAligned(t *testing.T) {
+	ws := workspace{
+		Name:   "project-08",
+		Branch: "feature",
+		Log:    "last commit",
+	}
+
+	got := formatWorkspaceDisplay(ws, false)
+	want := "   08 -> feature"
+	if got != want {
+		t.Fatalf("formatWorkspaceDisplay() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatWorkspaceDisplayUsesSuffixForNumberedWorkspaces(t *testing.T) {
+	ws := workspace{
+		Name:   "project-23",
+		Branch: "OPS-2321",
+		Log:    "last commit",
+		Num:    23,
+	}
+
+	got := formatWorkspaceDisplay(ws, false)
+	want := "   23 -> OPS-2321"
+	if got != want {
+		t.Fatalf("formatWorkspaceDisplay() = %q, want %q", got, want)
+	}
+}

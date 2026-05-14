@@ -22,6 +22,7 @@ type Workspace struct {
 	Path   string
 	Branch string
 	Log    string
+	Dirty  bool
 	Num    int
 }
 
@@ -87,6 +88,7 @@ func Collect(cfg Config) ([]Workspace, error) {
 			Path:   path,
 			Branch: branchOrSHA(path),
 			Log:    lastCommitLine(path),
+			Dirty:  hasChanges(path),
 			Num:    num,
 		})
 	}
@@ -96,6 +98,28 @@ func Collect(cfg Config) ([]Workspace, error) {
 	})
 
 	return result, nil
+}
+
+func List(cfg Config) ([]Workspace, error) {
+	baseRepoPath := filepath.Join(cfg.Root, cfg.Project)
+	stat, err := os.Stat(baseRepoPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("base repo not found: %s", baseRepoPath)
+		}
+		return nil, err
+	}
+	if !stat.IsDir() {
+		return nil, fmt.Errorf("base repo path is not a directory: %s", baseRepoPath)
+	}
+
+	cmd := exec.Command("git", "-C", baseRepoPath, "worktree", "list", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	return parseWorktreeList(cfg.Project, string(out)), nil
 }
 
 func SwitchPath(cfg Config, target string) (string, error) {
@@ -271,6 +295,11 @@ func lastCommitLine(repoPath string) string {
 	return logLine
 }
 
+func hasChanges(repoPath string) bool {
+	status, err := gitOutput(repoPath, "status", "--porcelain")
+	return err == nil && status != ""
+}
+
 func gitOutput(repoPath string, args ...string) (string, error) {
 	gitArgs := append([]string{"-C", repoPath}, args...)
 	cmd := exec.Command("git", gitArgs...)
@@ -279,6 +308,69 @@ func gitOutput(repoPath string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func parseWorktreeList(project string, output string) []Workspace {
+	var result []Workspace
+	var current Workspace
+	flush := func() {
+		if current.Path == "" {
+			return
+		}
+		current.Name = filepath.Base(current.Path)
+		current.Log = lastCommitLine(current.Path)
+		current.Dirty = hasChanges(current.Path)
+		current.Num = workspaceNum(project, current.Name)
+		result = append(result, current)
+		current = Workspace{}
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		if line == "" {
+			flush()
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+
+		switch key {
+		case "worktree":
+			flush()
+			current.Path = value
+		case "HEAD":
+			if current.Branch == "" {
+				current.Branch = value
+			}
+		case "branch":
+			current.Branch = shortBranchName(value)
+		}
+	}
+	flush()
+
+	return result
+}
+
+func shortBranchName(ref string) string {
+	ref = strings.TrimPrefix(ref, "refs/heads/")
+	ref = strings.TrimPrefix(ref, "refs/remotes/")
+	return ref
+}
+
+func workspaceNum(project, name string) int {
+	prefix := project + "-"
+	if !strings.HasPrefix(name, prefix) {
+		return 0
+	}
+
+	num, err := strconv.Atoi(strings.TrimPrefix(name, prefix))
+	if err != nil {
+		return 0
+	}
+
+	return num
 }
 
 func isAllDigits(s string) bool {

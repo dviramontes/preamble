@@ -8,7 +8,8 @@ It is designed around a project prefix (default: `project`) and a workspace root
 
 ## What it does
 
-- List numbered worktrees like `project-08` with their current branch.
+- List worktrees like `23 -> OPS-2321` with their current branch.
+- Mark worktrees with staged, unstaged, or untracked changes using a leading `/\` marker.
 - Resolve a suffix (e.g. `pre 08`) to a workspace path.
 - Create the next worktree with `pre new` from `origin/main`.
 - Create from another base ref with `pre new <branch>` (resolved as `origin/<branch>`).

@@ -21,9 +21,10 @@ type workspace = workspaces.Workspace
 var errUsage = errors.New("usage")
 
 const (
-	ansiReset = "\x1b[0m"
-	ansiCyan  = "\x1b[36m"
-	ansiGreen = "\x1b[32m"
+	ansiReset  = "\x1b[0m"
+	ansiCyan   = "\x1b[36m"
+	ansiGreen  = "\x1b[32m"
+	ansiYellow = "\x1b[33m"
 )
 
 func main() {
@@ -254,7 +255,7 @@ func loadConfig() (config, error) {
 }
 
 func listCommand(cfg config) error {
-	workspaces, err := collectWorkspaces(cfg)
+	workspaces, err := listWorkspaces(cfg)
 	if err != nil {
 		return err
 	}
@@ -286,21 +287,48 @@ func formatWorkspaceDisplay(ws workspace, color bool) string {
 	}
 	branch = truncateWithDots(branch, 28)
 
-	logLine := ws.Log
-	if logLine == "" {
-		logLine = "no commits"
-	}
-	logLine = truncateWithDots(logLine, 52)
-
-	worktreeText := fmt.Sprintf("[%s]", ws.Name)
-	branchText := fmt.Sprintf("(%s)", branch)
+	worktreeText := workspaceDisplayName(ws)
+	branchText := branch
+	statusText := workspaceStatusMarker(ws)
 
 	if color {
 		worktreeText = colorize(worktreeText, ansiCyan)
 		branchText = colorize(branchText, ansiGreen)
+		if ws.Dirty {
+			statusText = colorize(statusText, ansiYellow)
+		}
 	}
 
-	return fmt.Sprintf("%s %s : %s", worktreeText, branchText, logLine)
+	return fmt.Sprintf("%s %s -> %s", statusText, worktreeText, branchText)
+}
+
+func workspaceDisplayName(ws workspace) string {
+	if ws.Num > 0 {
+		return fmt.Sprintf("%02d", ws.Num)
+	}
+	if suffix := workspaceNameSuffix(ws.Name); suffix != "" {
+		return suffix
+	}
+	return ws.Name
+}
+
+func workspaceNameSuffix(name string) string {
+	idx := strings.LastIndex(name, "-")
+	if idx < 0 || idx+1 >= len(name) {
+		return ""
+	}
+	suffix := name[idx+1:]
+	if len(suffix) == 2 && suffix[0] >= '0' && suffix[0] <= '9' && suffix[1] >= '0' && suffix[1] <= '9' {
+		return suffix
+	}
+	return ""
+}
+
+func workspaceStatusMarker(ws workspace) string {
+	if ws.Dirty {
+		return "/\\"
+	}
+	return "  "
 }
 
 func truncateWithDots(value string, max int) string {
@@ -600,7 +628,7 @@ func (c *pickerController) refreshMeta() {
 	}
 
 	setStaticText(c.meta, fmt.Sprintf("project=%s  root=%s  workspaces=%d  current=%s", c.cfg.Project, truncateWithDots(c.cfg.Root, 36), len(c.workspaces), current))
-	setStaticText(c.listMeta, fmt.Sprintf("%d entries  |  * current cwd", len(c.workspaces)))
+	setStaticText(c.listMeta, fmt.Sprintf("%d entries  |  * current cwd  |  /\\ modified", len(c.workspaces)))
 }
 
 func (c *pickerController) openActionsDialog() {
@@ -938,6 +966,9 @@ func (c *pickerController) updateSelection(index int) {
 	if index == c.current {
 		state += "  |  current cwd"
 	}
+	if ws.Dirty {
+		state += "  |  /\\ modified"
+	}
 	setStaticText(c.name, ws.Name)
 	setStaticText(c.summary, state)
 	setStaticText(c.path, fmt.Sprintf("path: %s", truncateWithDots(ws.Path, 68)))
@@ -1120,6 +1151,10 @@ func verifyRefExists(repoPath, ref string) error {
 
 func collectWorkspaces(cfg config) ([]workspace, error) {
 	return workspaces.Collect(cfg)
+}
+
+func listWorkspaces(cfg config) ([]workspace, error) {
+	return workspaces.List(cfg)
 }
 
 func branchOrSHA(repoPath string) string {
