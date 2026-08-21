@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,24 @@ func TestResolveBaseRef(t *testing.T) {
 				t.Fatalf("ResolveBaseRef(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveBaseRefUsesConfiguredDefault(t *testing.T) {
+	got := resolveBaseRef(t.TempDir(), "", "upstream/trunk")
+	if got != "upstream/trunk" {
+		t.Fatalf("resolveBaseRef() = %q, want upstream/trunk", got)
+	}
+}
+
+func TestResolveBaseRefDetectsOriginHEAD(t *testing.T) {
+	repo := newTestRepository(t)
+	runGit(t, repo, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+	runGit(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+
+	got := resolveBaseRef(repo, "", "")
+	if got != "origin/trunk" {
+		t.Fatalf("resolveBaseRef() = %q, want origin/trunk", got)
 	}
 }
 
@@ -122,14 +141,7 @@ detached
 }
 
 func TestHasChanges(t *testing.T) {
-	repo := t.TempDir()
-	runGit(t, repo, "init")
-	runGit(t, repo, "config", "user.email", "pre@example.test")
-	runGit(t, repo, "config", "user.name", "pre test")
-
-	writeFile(t, filepath.Join(repo, "tracked.txt"), "clean\n")
-	runGit(t, repo, "add", "tracked.txt")
-	runGit(t, repo, "commit", "-m", "initial")
+	repo := newTestRepository(t)
 
 	if hasChanges(repo) {
 		t.Fatal("hasChanges() = true for clean repo, want false")
@@ -150,6 +162,66 @@ func TestHasChanges(t *testing.T) {
 	if !hasChanges(repo) {
 		t.Fatal("hasChanges() = false for untracked file, want true")
 	}
+}
+
+func TestCreateNextAndRemove(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "project")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	initTestRepository(t, repo)
+
+	cfg := Config{Root: root, Project: "project", DefaultRef: "HEAD"}
+	workspacePath, err := CreateNext(cfg, "")
+	if err != nil {
+		t.Fatalf("CreateNext() unexpected error: %v", err)
+	}
+	if workspacePath != filepath.Join(root, "project-01") {
+		t.Fatalf("CreateNext() path = %q, want project-01", workspacePath)
+	}
+
+	writeFile(t, filepath.Join(workspacePath, "dirty.txt"), "dirty\n")
+	if _, err := Remove(cfg, "01", false); err == nil {
+		t.Fatal("Remove() dirty worktree error = nil, want error")
+	}
+	if _, err := Remove(cfg, "01", true); err != nil {
+		t.Fatalf("Remove() with force unexpected error: %v", err)
+	}
+	if _, err := os.Stat(workspacePath); !os.IsNotExist(err) {
+		t.Fatalf("removed workspace still exists: %v", err)
+	}
+}
+
+func TestCreateNextReportsMissingDefaultRef(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "project")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	initTestRepository(t, repo)
+
+	_, err := CreateNext(Config{Root: root, Project: "project", DefaultRef: "origin/missing"}, "")
+	if err == nil || !strings.Contains(err.Error(), "base ref not found: origin/missing") {
+		t.Fatalf("CreateNext() error = %v, want missing ref error", err)
+	}
+}
+
+func newTestRepository(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	initTestRepository(t, repo)
+	return repo
+}
+
+func initTestRepository(t *testing.T, repo string) {
+	t.Helper()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "pre@example.test")
+	runGit(t, repo, "config", "user.name", "pre test")
+	writeFile(t, filepath.Join(repo, "tracked.txt"), "clean\n")
+	runGit(t, repo, "add", "tracked.txt")
+	runGit(t, repo, "commit", "-m", "initial")
 }
 
 func runGit(t *testing.T, repo string, args ...string) {
