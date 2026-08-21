@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -18,6 +19,10 @@ type config = workspaces.Config
 type workspace = workspaces.Workspace
 
 var errUsage = errors.New("usage")
+
+// version is set from the release tag by GoReleaser. The default is used when
+// the binary has neither a release stamp nor Go module build metadata.
+var version = "dev"
 
 const (
 	ansiReset  = "\x1b[0m"
@@ -38,6 +43,14 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && (args[0] == "version" || args[0] == "--version") {
+		if len(args) != 1 {
+			return errUsage
+		}
+		fmt.Fprintln(os.Stdout, currentVersion())
+		return nil
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -93,6 +106,18 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stdout, path)
 		return nil
 	}
+}
+
+func currentVersion() string {
+	if version != "dev" {
+		return version
+	}
+
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return strings.TrimPrefix(info.Main.Version, "v")
+	}
+
+	return version
 }
 
 func defaultCommand(cfg config) error {
@@ -216,7 +241,7 @@ pre() {
     local destination exit_code selection_file
 
     case "$1" in
-        list|help|-h|--help|setup|init|remove|rm)
+		list|version|--version|help|-h|--help|setup|init|remove|rm)
             command pre "$@"
             return $?
             ;;
@@ -1147,6 +1172,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  pre               Open picker (list when non-interactive)")
 	fmt.Fprintln(out, "  pre list          List workspaces")
+	fmt.Fprintln(out, "  pre version       Print the current version")
 	fmt.Fprintln(out, "  pre <suffix>      Print workspace path (08, 8, or project-08)")
 	fmt.Fprintln(out, "  pre new [base-ref] Create next workspace from base ref")
 	fmt.Fprintln(out, "  pre remove <suffix> --yes [--force] Remove a workspace")

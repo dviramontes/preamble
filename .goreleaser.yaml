@@ -6,6 +6,8 @@ builds:
   - id: pre
     main: ./cmd/pre
     binary: pre
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
     env:
       - CGO_ENABLED=0
     goos:
