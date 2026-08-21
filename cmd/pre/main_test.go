@@ -44,6 +44,16 @@ func TestParseRemoveArgs(t *testing.T) {
 	}
 }
 
+func TestCurrentVersion(t *testing.T) {
+	originalVersion := version
+	t.Cleanup(func() { version = originalVersion })
+
+	version = "1.2.3"
+	if got, want := currentVersion(), "1.2.3"; got != want {
+		t.Fatalf("currentVersion() = %q, want %q", got, want)
+	}
+}
+
 func TestFormatWorkspaceDisplayShowsDirtyMarker(t *testing.T) {
 	ws := workspace{
 		Name:   "project-08",

@@ -59,6 +59,7 @@ idempotent source line to `~/.zshrc`.
 ```bash
 pre                 # interactive picker in a TTY; list otherwise
 pre list
+pre version
 pre 08
 pre new
 pre new other-branch
@@ -124,7 +125,8 @@ go run ./cmd/pre list
 ## Releasing
 
 Push a semantic-version tag to build macOS and Linux archives and publish a
-GitHub release:
+GitHub release. The release build bakes the tag's version into the binary, which
+is displayed by `pre version`:
 
 ```bash
 git tag v0.1.0
