@@ -2,6 +2,9 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -82,5 +85,35 @@ func TestFormatWorkspaceDisplayUsesSuffixForNumberedWorkspaces(t *testing.T) {
 	want := "   23 -> OPS-2321"
 	if got != want {
 		t.Fatalf("formatWorkspaceDisplay() = %q, want %q", got, want)
+	}
+}
+
+func TestInstallZshWrapperIsPersistentAndIdempotent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := installZshWrapper(); err != nil {
+		t.Fatalf("installZshWrapper() unexpected error: %v", err)
+	}
+	if err := installZshWrapper(); err != nil {
+		t.Fatalf("second installZshWrapper() unexpected error: %v", err)
+	}
+
+	wrapperPath := filepath.Join(home, ".config", "preamble", "pre.zsh")
+	wrapper, err := os.ReadFile(wrapperPath)
+	if err != nil {
+		t.Fatalf("read wrapper: %v", err)
+	}
+	if !strings.Contains(string(wrapper), "pre()") {
+		t.Fatalf("wrapper does not define pre(): %s", wrapper)
+	}
+
+	zshrc, err := os.ReadFile(filepath.Join(home, ".zshrc"))
+	if err != nil {
+		t.Fatalf("read .zshrc: %v", err)
+	}
+	sourceLine := `[ -f "$HOME/.config/preamble/pre.zsh" ] && source "$HOME/.config/preamble/pre.zsh"`
+	if got := strings.Count(string(zshrc), sourceLine); got != 1 {
+		t.Fatalf(".zshrc source line count = %d, want 1\n%s", got, zshrc)
 	}
 }

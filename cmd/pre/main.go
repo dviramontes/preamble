@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -153,20 +152,17 @@ func setupCommand(install bool) error {
 		return err
 	}
 
-	fmt.Fprintln(os.Stdout, "Installed pre zsh wrapper in ~/.functions.sh")
-	fmt.Fprintln(os.Stdout, "Reload with: source ~/.functions.sh")
+	fmt.Fprintln(os.Stdout, "Installed pre zsh wrapper in ~/.config/preamble/pre.zsh")
+	fmt.Fprintln(os.Stdout, "Updated ~/.zshrc; restart your shell or run: source ~/.zshrc")
 	return nil
 }
 
 func printSetupInstructions(out *os.File) {
 	fmt.Fprintln(out, "pre shell setup")
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "To enable cd behavior for 'pre <suffix>', add this wrapper to ~/.functions.sh:")
+	fmt.Fprintln(out, "To enable cd behavior for 'pre <suffix>', add this wrapper to your zsh configuration:")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, zshWrapperBlock())
-	fmt.Fprintln(out, "Then reload your shell:")
-	fmt.Fprintln(out, "  source ~/.functions.sh")
-	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Or run:")
 	fmt.Fprintln(out, "  pre setup --install")
 }
@@ -177,38 +173,40 @@ func installZshWrapper() error {
 		return err
 	}
 
-	functionsPath := filepath.Join(home, ".functions.sh")
-	block := zshWrapperBlock()
+	configDir := filepath.Join(home, ".config", "preamble")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return err
+	}
 
-	content, err := os.ReadFile(functionsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return os.WriteFile(functionsPath, []byte(block+"\n"), 0644)
-		}
+	wrapperPath := filepath.Join(configDir, "pre.zsh")
+	if err := os.WriteFile(wrapperPath, []byte(zshWrapperBlock()+"\n"), 0644); err != nil {
+		return err
+	}
+
+	zshrcPath := filepath.Join(home, ".zshrc")
+	sourceLine := `[ -f "$HOME/.config/preamble/pre.zsh" ] && source "$HOME/.config/preamble/pre.zsh"`
+	return ensureShellSource(zshrcPath, sourceLine)
+}
+
+func ensureShellSource(path, sourceLine string) error {
+	content, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
 	text := string(content)
-	begin := "# >>> pre zsh wrapper >>>"
-	end := "# <<< pre zsh wrapper <<<"
-
-	startIdx := strings.Index(text, begin)
-	endIdx := strings.Index(text, end)
-	if startIdx >= 0 && endIdx > startIdx {
-		replaceEnd := endIdx + len(end)
-		if replaceEnd < len(text) && text[replaceEnd] == '\n' {
-			replaceEnd++
-		}
-		updated := text[:startIdx] + block + "\n" + text[replaceEnd:]
-		return os.WriteFile(functionsPath, []byte(updated), 0644)
+	if strings.Contains(text, sourceLine) {
+		return nil
 	}
-
-	if len(text) > 0 && !strings.HasSuffix(text, "\n") {
+	if text != "" && !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
-	text += "\n" + block + "\n"
+	if text != "" {
+		text += "\n"
+	}
+	text += "# preamble shell integration\n" + sourceLine + "\n"
 
-	return os.WriteFile(functionsPath, []byte(text), 0644)
+	return os.WriteFile(path, []byte(text), 0644)
 }
 
 func zshWrapperBlock() string {
@@ -1137,18 +1135,6 @@ func removeWorkspacePath(cfg config, workspacePath string, force bool) error {
 	return workspaces.RemovePath(cfg, workspacePath, force)
 }
 
-func resolveBaseRef(rawRef string) string {
-	return workspaces.ResolveBaseRef(rawRef)
-}
-
-func verifyRefExists(repoPath, ref string) error {
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("base ref not found: %s (try: git -C %s fetch origin)", ref, repoPath)
-	}
-	return nil
-}
-
 func collectWorkspaces(cfg config) ([]workspace, error) {
 	return workspaces.Collect(cfg)
 }
@@ -1157,55 +1143,9 @@ func listWorkspaces(cfg config) ([]workspace, error) {
 	return workspaces.List(cfg)
 }
 
-func branchOrSHA(repoPath string) string {
-	branch, err := gitOutput(repoPath, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err == nil && branch != "" {
-		return branch
-	}
-
-	sha, err := gitOutput(repoPath, "rev-parse", "--short", "HEAD")
-	if err == nil {
-		return sha
-	}
-
-	return ""
-}
-
-func lastCommitLine(repoPath string) string {
-	logLine, err := gitOutput(repoPath, "log", "-1", "--pretty=format:%s")
-	if err != nil {
-		return ""
-	}
-
-	return logLine
-}
-
-func gitOutput(repoPath string, args ...string) (string, error) {
-	gitArgs := append([]string{"-C", repoPath}, args...)
-	cmd := exec.Command("git", gitArgs...)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func normalizeTarget(project, target string) (string, error) {
-	return workspaces.NormalizeTarget(project, target)
-}
-
-func isAllDigits(s string) bool {
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func printUsage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  pre               List workspaces")
+	fmt.Fprintln(out, "  pre               Open picker (list when non-interactive)")
 	fmt.Fprintln(out, "  pre list          List workspaces")
 	fmt.Fprintln(out, "  pre <suffix>      Print workspace path (08, 8, or project-08)")
 	fmt.Fprintln(out, "  pre new [base-ref] Create next workspace from base ref")
@@ -1217,4 +1157,5 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Defaults:")
 	fmt.Fprintln(out, "  PRE_BASE=$HOME/local/work/project")
+	fmt.Fprintln(out, "  PRE_DEFAULT_REF=<detected from origin/HEAD, fallback origin/main>")
 }

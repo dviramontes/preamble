@@ -13,8 +13,9 @@ import (
 )
 
 type Config struct {
-	Root    string
-	Project string
+	Root       string
+	Project    string
+	DefaultRef string
 }
 
 type Workspace struct {
@@ -44,7 +45,11 @@ func LoadConfig() (Config, error) {
 	root := filepath.Dir(base)
 	project := filepath.Base(base)
 
-	return Config{Root: root, Project: project}, nil
+	return Config{
+		Root:       root,
+		Project:    project,
+		DefaultRef: os.Getenv("PRE_DEFAULT_REF"),
+	}, nil
 }
 
 func Collect(cfg Config) ([]Workspace, error) {
@@ -173,7 +178,7 @@ func CreateNext(cfg Config, rawRef string) (string, error) {
 		return "", fmt.Errorf("workspace already exists: %s", newPath)
 	}
 
-	baseRef := ResolveBaseRef(rawRef)
+	baseRef := resolveBaseRef(baseRepoPath, rawRef, cfg.DefaultRef)
 	if err := verifyRefExists(baseRepoPath, baseRef); err != nil {
 		return "", err
 	}
@@ -245,6 +250,21 @@ func ResolveBaseRef(rawRef string) string {
 	}
 
 	return "origin/" + rawRef
+}
+
+func resolveBaseRef(repoPath, rawRef, configuredDefault string) string {
+	if rawRef != "" {
+		return ResolveBaseRef(rawRef)
+	}
+	if configuredDefault != "" {
+		return configuredDefault
+	}
+
+	ref, err := gitOutput(repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err == nil && ref != "" {
+		return ref
+	}
+	return "origin/main"
 }
 
 func NormalizeTarget(project, target string) (string, error) {
